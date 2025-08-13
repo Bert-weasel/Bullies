@@ -1,23 +1,29 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bull Trout Map (Prototype)</title>
+  <title>Bull Trout Map (Prototype - No Plugin)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     html, body, #map { height: 100%; margin: 0; }
     .legend {
       position: absolute; bottom: 20px; left: 20px; z-index: 9999;
       background: white; padding: 10px 12px; border: 1px solid #999; border-radius: 6px; font-size: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
     }
     .popup-table { font-size: 12px; border-collapse: collapse; }
     .popup-table th, .popup-table td { border: 1px solid #aaa; padding: 2px 4px; }
+    .loading {
+      position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+      background: #fff; border: 1px solid #aaa; padding: 6px 10px; border-radius: 4px; font-size: 13px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.15); z-index: 9999;
+    }
   </style>
 </head>
 <body>
   <div id="map"></div>
+  <div id="loading" class="loading">Loading data…</div>
 
   <div class="legend">
     <div><b>Legend</b></div>
@@ -33,11 +39,8 @@
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <!-- Regular polygon marker plugin -->
-  <script src="https://unpkg.com/leaflet-regularpolygon@1.0.0/L.RegularPolygon.js"></script>
-
   <script>
-    // Map init (Idaho-ish center)
+    // Initialize map
     var map = L.map('map').setView([45.0, -114.0], 6);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 18,
@@ -53,7 +56,7 @@
       "Extra-large": "#000000"
     };
 
-    // Shape map
+    // Determine number of sides by month
     function sidesForMonth(m) {
       if (m === 7) return 6; // hex
       if (m === 8) return 4; // square
@@ -61,15 +64,40 @@
       return 4;
     }
 
-    // Size scaling: clamp to 8..24 px (radius is half in plugin)
-    function radiusForCount(count, minCount, maxCount) {
-      var minPx = 8, maxPx = 24;
-      if (maxCount === minCount) return (minPx + maxPx)/4; // radius (half size)
-      var size = minPx + (count - minCount) * (maxPx - minPx) / (maxCount - minCount);
-      return size / 2.0;
+    // Generate regular polygon points for an SVG
+    function polygonPoints(sides, size) {
+      var cx = size/2, cy = size/2, r = size/2;
+      var pts = [];
+      var rotation = -Math.PI / 2; // start at top
+      for (var i = 0; i < sides; i++) {
+        var angle = rotation + (i * 2*Math.PI / sides);
+        var x = cx + r * Math.cos(angle);
+        var y = cy + r * Math.sin(angle);
+        pts.push(x.toFixed(2) + "," + y.toFixed(2));
+      }
+      return pts.join(" ");
     }
 
-    // Build popup HTML for a stack
+    // Create a DivIcon with an inline SVG polygon
+    function makeShapeIcon(sides, sizePx, fill, stroke, opacity) {
+      var pts = polygonPoints(sides, sizePx);
+      var svg = '<svg width="'+sizePx+'" height="'+sizePx+'" viewBox="0 0 '+sizePx+' '+sizePx+'" xmlns="http://www.w3.org/2000/svg">'+
+                '<polygon points="'+pts+'" fill="'+fill+'" fill-opacity="'+opacity+'" stroke="'+stroke+'" stroke-width="1" /></svg>';
+      return L.divIcon({
+        className: 'shape-icon',
+        html: svg,
+        iconSize: [sizePx, sizePx],
+        iconAnchor: [sizePx/2, sizePx/2]
+      });
+    }
+
+    // Scaling from counts to size in pixels (8..24 px)
+    function sizePxForCount(count, minCount, maxCount) {
+      var minPx = 8, maxPx = 24;
+      if (maxCount === minCount) return (minPx + maxPx) / 2;
+      return minPx + (count - minCount) * (maxPx - minPx) / (maxCount - minCount);
+    }
+
     function makePopup(lat, lon, month, week, items) {
       var html = '<div><b>Location:</b> ' + lat.toFixed(5) + ', ' + lon.toFixed(5) + '<br>' +
                  '<b>Month:</b> ' + month + ' &nbsp; <b>Week:</b> ' + week + '<br>' +
@@ -84,48 +112,56 @@
       return html;
     }
 
-    // Load data
+    // Load data and render
     fetch('bulltrout_data.json')
-      .then(resp => resp.json())
-      .then(data => {
-        // Global min/max counts for scaling
+      .then(function(resp){
+        if (!resp.ok) throw new Error('Failed to fetch bulltrout_data.json: ' + resp.status);
+        return resp.json();
+      })
+      .then(function(data){
+        // Compute global min/max for scaling and bounds to fit
         var allCounts = [];
+        var bounds = [];
         data.stacks.forEach(function(s){
+          bounds.push([s.lat, s.lon]);
           s.items.forEach(function(it){ allCounts.push(it.count); });
         });
         var minCount = Math.min.apply(null, allCounts);
         var maxCount = Math.max.apply(null, allCounts);
 
-        // Draw each stack as layered markers
-        data.stacks.forEach(function(s){
-          // Sort ascending by count so smaller icons are on top
-          var items = s.items.slice().sort(function(a,b){ return a.count - b.count; });
-          var n = items.length;
-          var popup = L.popup({maxWidth: 480}).setContent(makePopup(s.lat, s.lon, s.month, s.week, items));
+        if (bounds.length) {
+          map.fitBounds(bounds, {padding: [20, 20]});
+        }
 
-          items.forEach(function(it, idx){
+        // Draw each stack. We add LARGEST first, SMALLEST last so smallest sits on top.
+        data.stacks.forEach(function(s){
+          var itemsAsc = s.items.slice().sort(function(a,b){ return a.count - b.count; }); // ascending
+          var popup = L.popup({maxWidth: 480}).setContent(makePopup(s.lat, s.lon, s.month, s.week, itemsAsc));
+
+          for (var i = itemsAsc.length - 1; i >= 0; i--) {
+            var it = itemsAsc[i]; // largest down to smallest
+            var sizePx = sizePxForCount(it.count, minCount, maxCount);
             var sides = sidesForMonth(s.month);
             var fill = colorMap[it.sizeCat];
             var stroke = (it.sizeCat === 'Medium-small') ? '#000000' : fill;
-            var alpha = (n > 1) ? (0.8 + (idx/(n-1)) * 0.2) : 1.0; // 0.8..1.0
 
-            var marker = new L.RegularPolygonMarker(
-              new L.LatLng(s.lat, s.lon),
-              {
-                numberOfSides: sides,
-                radius: radiusForCount(it.count, minCount, maxCount),
-                rotation: 0,
-                weight: 1,
-                color: stroke,
-                fill: true,
-                fillColor: fill,
-                fillOpacity: alpha
-              }
-            ).addTo(map);
+            // Opacity: background (largest) 1.0 → foreground (smallest) 0.8
+            var rank = itemsAsc.length - 1 - i; // 0 for largest, (n-1) for smallest
+            var alpha = 1.0 - (rank / Math.max(1, itemsAsc.length - 1)) * 0.2; // 1.0 .. 0.8
 
+            var icon = makeShapeIcon(sides, sizePx, fill, stroke, alpha);
+            var marker = L.marker([s.lat, s.lon], {icon: icon}).addTo(map);
             marker.bindPopup(popup);
-          });
+          }
         });
+      })
+      .catch(function(err){
+        console.error(err);
+        document.getElementById('loading').textContent = 'Error: ' + err.message;
+      })
+      .finally(function(){
+        var el = document.getElementById('loading');
+        if (el) el.remove();
       });
   </script>
 </body>
