@@ -1,0 +1,132 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bull Trout Map (Prototype)</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    .legend {
+      position: absolute; bottom: 20px; left: 20px; z-index: 9999;
+      background: white; padding: 10px 12px; border: 1px solid #999; border-radius: 6px; font-size: 12px;
+    }
+    .popup-table { font-size: 12px; border-collapse: collapse; }
+    .popup-table th, .popup-table td { border: 1px solid #aaa; padding: 2px 4px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="legend">
+    <div><b>Legend</b></div>
+    <div style="margin-top:6px;"><b>Month (shape):</b> Hex = July, Square = Aug, Triangle = Sep</div>
+    <div style="margin-top:6px;"><b>Size (color):</b>
+      <span style="display:inline-block;width:12px;height:12px;background:#1f77b4;border:1px solid #1f77b4;margin-right:6px;"></span>Small
+      <span style="display:inline-block;width:12px;height:12px;background:#ffffff;border:1px solid #000;margin:0 6px;"></span>Medium-small
+      <span style="display:inline-block;width:12px;height:12px;background:#FFD700;border:1px solid #FFD700;margin:0 6px;"></span>Medium-large
+      <span style="display:inline-block;width:12px;height:12px;background:#FF0000;border:1px solid #FF0000;margin:0 6px;"></span>Large
+      <span style="display:inline-block;width:12px;height:12px;background:#000000;border:1px solid #000000;margin-left:6px;"></span>Extra-large
+    </div>
+    <div style="margin-top:6px;">Icon size scales with count (3:1 max:min). Foreground icons are semi-transparent.</div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Regular polygon marker plugin -->
+  <script src="https://unpkg.com/leaflet-regularpolygon@1.0.0/L.RegularPolygon.js"></script>
+
+  <script>
+    // Map init (Idaho-ish center)
+    var map = L.map('map').setView([45.0, -114.0], 6);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    // Color map
+    var colorMap = {
+      "Small": "#1f77b4",
+      "Medium-small": "#ffffff",
+      "Medium-large": "#FFD700",
+      "Large": "#FF0000",
+      "Extra-large": "#000000"
+    };
+
+    // Shape map
+    function sidesForMonth(m) {
+      if (m === 7) return 6; // hex
+      if (m === 8) return 4; // square
+      if (m === 9) return 3; // triangle
+      return 4;
+    }
+
+    // Size scaling: clamp to 8..24 px (radius is half in plugin)
+    function radiusForCount(count, minCount, maxCount) {
+      var minPx = 8, maxPx = 24;
+      if (maxCount === minCount) return (minPx + maxPx)/4; // radius (half size)
+      var size = minPx + (count - minCount) * (maxPx - minPx) / (maxCount - minCount);
+      return size / 2.0;
+    }
+
+    // Build popup HTML for a stack
+    function makePopup(lat, lon, month, week, items) {
+      var html = '<div><b>Location:</b> ' + lat.toFixed(5) + ', ' + lon.toFixed(5) + '<br>' +
+                 '<b>Month:</b> ' + month + ' &nbsp; <b>Week:</b> ' + week + '<br>' +
+                 '<b>Groups:</b> ' + items.length + '</div><br>';
+      html += '<table class="popup-table"><tr><th>Size</th><th>Count</th><th>Dates</th><th>Lengths (in)</th></tr>';
+      items.forEach(function(it){
+        var dates = (it.dates || []).join(', ');
+        var lens = (it.lengths_in || []).filter(function(x){ return x !== null && x !== undefined; }).join(', ');
+        html += '<tr><td>' + it.sizeCat + '</td><td>' + it.count + '</td><td style="max-width:220px;">' + dates + '</td><td style="max-width:220px;">' + lens + '</td></tr>';
+      });
+      html += '</table>';
+      return html;
+    }
+
+    // Load data
+    fetch('bulltrout_data.json')
+      .then(resp => resp.json())
+      .then(data => {
+        // Global min/max counts for scaling
+        var allCounts = [];
+        data.stacks.forEach(function(s){
+          s.items.forEach(function(it){ allCounts.push(it.count); });
+        });
+        var minCount = Math.min.apply(null, allCounts);
+        var maxCount = Math.max.apply(null, allCounts);
+
+        // Draw each stack as layered markers
+        data.stacks.forEach(function(s){
+          // Sort ascending by count so smaller icons are on top
+          var items = s.items.slice().sort(function(a,b){ return a.count - b.count; });
+          var n = items.length;
+          var popup = L.popup({maxWidth: 480}).setContent(makePopup(s.lat, s.lon, s.month, s.week, items));
+
+          items.forEach(function(it, idx){
+            var sides = sidesForMonth(s.month);
+            var fill = colorMap[it.sizeCat];
+            var stroke = (it.sizeCat === 'Medium-small') ? '#000000' : fill;
+            var alpha = (n > 1) ? (0.8 + (idx/(n-1)) * 0.2) : 1.0; // 0.8..1.0
+
+            var marker = new L.RegularPolygonMarker(
+              new L.LatLng(s.lat, s.lon),
+              {
+                numberOfSides: sides,
+                radius: radiusForCount(it.count, minCount, maxCount),
+                rotation: 0,
+                weight: 1,
+                color: stroke,
+                fill: true,
+                fillColor: fill,
+                fillOpacity: alpha
+              }
+            ).addTo(map);
+
+            marker.bindPopup(popup);
+          });
+        });
+      });
+  </script>
+</body>
+</html>
