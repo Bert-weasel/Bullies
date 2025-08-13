@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bull Trout Map (Segmented + Viewport + Details from bulltrout_data.json)</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    .panel {
+      position: absolute; top: 12px; left: 12px; z-index: 9999;
+      background: white; padding: 10px 12px; border: 1px solid #999; border-radius: 6px;
+      font-size: 13px; box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+      max-width: 340px;
+    }
+    .legend {
+      position: absolute; bottom: 20px; left: 20px; z-index: 9999;
+      background: white; padding: 10px 12px; border: 1px solid #999; border-radius: 6px; font-size: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
+    .popup-table { font-size: 12px; border-collapse: collapse; }
+    .popup-table th, .popup-table td { border: 1px solid #aaa; padding: 2px 4px; vertical-align: top; }
+    .muted { color: #666; }
+    .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #999; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="panel">
+    <div><b>Filters</b></div>
+    <label><input type="checkbox" id="toggle-jul" checked> July (triangle)</label><br>
+    <label><input type="checkbox" id="toggle-aug" checked> August (star)</label><br>
+    <label><input type="checkbox" id="toggle-sep" checked> September (circle)</label><br>
+    <div style="margin-top:6px;" class="muted">Markers render only inside the current view for speed.</div>
+  </div>
+
+  <div class="legend">
+    <div><b>Legend</b></div>
+    <div style="margin-top:6px;"><b>Month (shape):</b> Triangle = Jul, Star = Aug, Circle = Sep</div>
+    <div style="margin-top:6px;"><b>Size (color):</b>
+      <span style="display:inline-block;width:12px;height:12px;background:#1f77b4;border:1px solid #1f77b4;margin-right:6px;"></span>Small
+      <span style="display:inline-block;width:12px;height:12px;background:#ffffff;border:1px solid #000;margin:0 6px;"></span>Medium-small
+      <span style="display:inline-block;width:12px;height:12px;background:#FFD700;border:1px solid #FFD700;margin:0 6px;"></span>Medium-large
+      <span style="display:inline-block;width:12px;height:12px;background:#FF0000;border:1px solid #FF0000;margin:0 6px;"></span>Large
+      <span style="display:inline-block;width:12px;height:12px;background:#000000;border:1px solid #000000;margin-left:6px;"></span>Extra-large
+    </div>
+    <div style="margin-top:6px;">Icon size scales with count (min 20 px, max 40 px). Segment floor = 15%.</div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // Map init
+    var map = L.map('map').setView([45.0, -114.0], 6);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    // Color map (size categories)
+    var SIZE_ORDER = ["Small","Medium-small","Medium-large","Large","Extra-large"];
+    var COLOR = {"Small":"#1f77b4","Medium-small":"#ffffff","Medium-large":"#FFD700","Large":"#FF0000","Extra-large":"#000000"};
+
+    // Month shapes & strokes
+    function shapeForMonth(m) {
+      if (m === 7) return "triangle";
+      if (m === 8) return "star";
+      if (m === 9) return "circle";
+      return "circle";
+    }
+    function strokeForMonth(m) { return "#333"; }
+
+    // Sizing range
+    var MIN_PX = 20, MAX_PX = 40; // 2x range
+    function sizePx(total, minTotal, maxTotal) {
+      if (maxTotal === minTotal) return (MIN_PX + MAX_PX) / 2;
+      return MIN_PX + (total - minTotal) * (MAX_PX - MIN_PX) / (maxTotal - minTotal);
+    }
+
+    // Segment allocation with 15% floor
+    function segmentFractions(counts) {
+      var present = SIZE_ORDER.filter(c => (counts[c]||0) > 0);
+      if (present.length === 0) return [];
+      if (present.length === 1) return [{cat: present[0], f: 1}];
+      var total = present.reduce((s,c)=>s+counts[c],0);
+      var raw = {}; present.forEach(c => raw[c] = counts[c]/total);
+      var floor = 0.15;
+      var floors = {}; present.forEach(c => floors[c] = Math.min(raw[c], floor));
+      var floorSum = present.reduce((s,c)=>s+floors[c],0);
+      var leftover = Math.max(0, 1 - floorSum);
+      var above = {}; present.forEach(c => above[c] = Math.max(0, raw[c]-floors[c]));
+      var aboveSum = present.reduce((s,c)=>s+above[c],0);
+      var frac = {};
+      if (aboveSum > 0) {
+        present.forEach(c => frac[c] = floors[c] + leftover * (above[c]/aboveSum));
+      } else {
+        present.forEach(c => frac[c] = floors[c] / floorSum);
+      }
+      return present.map(c => ({cat: c, f: frac[c]}));
+    }
+
+    // SVG helper functions
+    function trianglePath(size) {
+      var r = size/2, cx = r, cy = r;
+      var angle = -Math.PI/2;
+      var pts = [];
+      for (var i=0;i<3;i++) {
+        var a = angle + i*2*Math.PI/3;
+        pts.push([cx + r*Math.cos(a), cy + r*Math.sin(a)]);
+      }
+      return "M " + pts.map(p => p[0].toFixed(2)+","+p[1].toFixed(2)).join(" L ") + " Z";
+    }
+    function starPath(size, points=5, innerRatio=0.5) {
+      var r = size/2, cx = r, cy = r;
+      var path = [];
+      var angle = -Math.PI/2;
+      for (var i=0;i<points*2;i++) {
+        var rr = (i%2===0) ? r : r*innerRatio;
+        var a = angle + i*Math.PI/points;
+        var x = cx + rr*Math.cos(a), y = cy + rr*Math.sin(a);
+        path.push((i===0?"M ":"L ")+x.toFixed(2)+","+y.toFixed(2));
+      }
+      path.push("Z");
+      return path.join(" ");
+    }
+    function arcPath(cx, cy, r, startAngle, endAngle) {
+      var x1 = cx + r*Math.cos(startAngle), y1 = cy + r*Math.sin(startAngle);
+      var x2 = cx + r*Math.cos(endAngle),   y2 = cy + r*Math.sin(endAngle);
+      var largeArc = (endAngle - startAngle) > Math.PI ? 1 : 0;
+      return "M "+cx+","+cy+" L "+x1+","+y1+" A "+r+","+r+" 0 "+largeArc+" 1 "+x2+","+y2+" Z";
+    }
+
+    function makeSegmentedIcon(shape, counts, total, strokeColor, sizePxVal) {
+      var size = sizePxVal;
+      var r = size/2, cx = r, cy = r;
+      var fracs = segmentFractions(counts);
+      if (fracs.length === 0) fracs = [{cat:"Small", f:1}];
+
+      var clipId = "clip-"+shape+"-"+Math.random().toString(36).slice(2);
+      var shapePath = "", shapeElem = "";
+      if (shape === "triangle") {
+        shapePath = trianglePath(size);
+        shapeElem = '<path d="'+shapePath+'" />';
+      } else if (shape === "star") {
+        shapePath = starPath(size, 5, 0.5);
+        shapeElem = '<path d="'+shapePath+'" />';
+      } else {
+        shapeElem = '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" />';
+      }
+
+      var start = -Math.PI/2;
+      var wedges = "", separators = "";
+      fracs.forEach(function(seg){
+        var end = start + seg.f * Math.PI*2;
+        var path = arcPath(cx, cy, r, start, end);
+        var fill = COLOR[seg.cat];
+        var stroke = (seg.cat === "Medium-small") ? "#000000" : fill;
+        wedges += '<path d="'+path+'" fill="'+fill+'" stroke="#fff" stroke-width="0.75" />';
+        var sx = cx + r*Math.cos(end), sy = cy + r*Math.sin(end);
+        separators += '<line x1="'+cx+'" y1="'+cy+'" x2="'+sx+'" y2="'+sy+'" stroke="#fff" stroke-width="0.75"/>';
+        start = end;
+      });
+
+      var outline = "";
+      if (shape === "triangle" || shape === "star") {
+        outline = '<path d="'+shapePath+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
+      } else {
+        outline = '<circle cx="'+cx+'" cy="'+cy+'" r="'+(r-0.5)+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
+      }
+
+      var svg;
+      if (shape === "circle") {
+        svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
+              '<g>'+wedges+separators+'</g>'+outline+'</svg>';
+      } else {
+        svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
+              '<defs><clipPath id="'+clipId+'">'+shapeElem+'</clipPath></defs>'+
+              '<g clip-path="url(#'+clipId+')">'+wedges+separators+'</g>'+outline+'</svg>';
+      }
+
+      return L.divIcon({
+        className: 'seg-icon',
+        html: svg,
+        iconSize: [size, size],
+        iconAnchor: [size/2, size/2]
+      });
+    }
+
+    // Files
+    var MONTH_FILES = {7: "bulltrout_jul.json", 8: "bulltrout_aug.json", 9: "bulltrout_sep.json"};
+    var DETAILS_FILE = "bulltrout_data.json"; // use existing combined data
+
+    var monthData = {}; // m -> {month, sites:[...]}
+    var allStacks = null; // {stacks:[...]} from bulltrout_data.json
+    var totalRange = {min: Infinity, max: -Infinity};
+
+    function loadMonth(m) {
+      if (monthData[m]) return Promise.resolve(monthData[m]);
+      return fetch(MONTH_FILES[m]).then(r => r.json()).then(j => {
+        monthData[m] = j;
+        j.sites.forEach(s => {
+          totalRange.min = Math.min(totalRange.min, s.total);
+          totalRange.max = Math.max(totalRange.max, s.total);
+        });
+        return j;
+      });
+    }
+    function loadAllStacks() {
+      if (allStacks) return Promise.resolve(allStacks);
+      return fetch(DETAILS_FILE).then(r => r.json()).then(j => { allStacks = j; return j; });
+    }
+
+    // UI toggles
+    var chkJul = document.getElementById('toggle-jul');
+    var chkAug = document.getElementById('toggle-aug');
+    var chkSep = document.getElementById('toggle-sep');
+    [chkJul, chkAug, chkSep].forEach(chk => chk.addEventListener('change', scheduleRender));
+
+    // Layer management
+    var layerGroup = L.layerGroup().addTo(map);
+    var renderScheduled = false;
+    function scheduleRender() {
+      if (renderScheduled) return;
+      renderScheduled = true;
+      requestAnimationFrame(function(){ renderScheduled = false; render(); });
+    }
+
+    function inBounds(lat, lon, bounds) { return bounds.contains([lat, lon]); }
+
+    function mergeSites(enabledMonths) {
+      var merged = {}; // key -> {lat, lon, months: {m: site}}
+      enabledMonths.forEach(m => {
+        var j = monthData[m]; if (!j) return;
+        j.sites.forEach(site => {
+          var key = site.lat.toFixed(5)+","+site.lon.toFixed(5);
+          if (!merged[key]) merged[key] = {lat: site.lat, lon: site.lon, months: {}};
+          merged[key].months[m] = site;
+        });
+      });
+      return merged;
+    }
+
+    function summarizeFromStacks(lat, lon, month) {
+      // Using allStacks.stacks: [{lat, lon, month, week, items:[{sizeCat,count,dates[],lengths_in[]}, ...]}]
+      if (!allStacks || !allStacks.stacks) return null;
+      var keyLat = Number(lat.toFixed(5)), keyLon = Number(lon.toFixed(5));
+      var subset = allStacks.stacks.filter(s => Math.abs(s.lat - keyLat) < 1e-5 && Math.abs(s.lon - keyLon) < 1e-5 && s.month === month);
+      if (subset.length === 0) return null;
+
+      // Build rows aggregated by week & sizeCat with counts and length summaries
+      var rows = []; // {week, sizeCat, count, lenMin, lenMed, lenMax, dates}
+      subset.forEach(function(stack){
+        (stack.items || []).forEach(function(it){
+          var lens = (it.lengths_in || []).filter(x => x != null).slice().sort(function(a,b){return a-b;});
+          var count = it.count || lens.length || ((it.dates||[]).length);
+          var lenMin = lens.length ? lens[0] : null;
+          var lenMax = lens.length ? lens[lens.length-1] : null;
+          var lenMed = null;
+          if (lens.length) {
+            var mid = Math.floor(lens.length/2);
+            lenMed = (lens.length % 2 === 0) ? ( (lens[mid-1]+lens[mid])/2 ) : lens[mid];
+            lenMed = Math.round(lenMed*10)/10;
+          }
+          rows.push({
+            week: stack.week,
+            sizeCat: it.sizeCat,
+            count: count,
+            lenMin: lenMin, lenMed: lenMed, lenMax: lenMax,
+            dates: Array.from(new Set(it.dates || []))
+          });
+        });
+      });
+
+      // Sort by week asc, then size order
+      rows.sort(function(a,b){
+        if (a.week !== b.week) return a.week - b.week;
+        return SIZE_ORDER.indexOf(a.sizeCat) - SIZE_ORDER.indexOf(b.sizeCat);
+      });
+      return rows;
+    }
+
+    function popupHtml(lat, lon, m, site) {
+      var key = lat.toFixed(5)+","+lon.toFixed(5);
+      var spinner = '<span class="spinner"></span>';
+      var html = '<div style="font-size:12px;"><b>Location:</b> '+lat.toFixed(5)+', '+lon.toFixed(5)+'<br>'+
+                 '<b>Month:</b> '+m+' &nbsp; <b>Total (month):</b> '+site.total+'<br>'+
+                 '<div id="detail-'+m+'-'+key.replace(/\\.|,/g,"_")+'">Loading details '+spinner+'...</div></div>';
+      return html;
+    }
+
+    function attachPopup(marker, lat, lon, m, site) {
+      var popup = L.popup({maxWidth: 560}).setContent(popupHtml(lat, lon, m, site));
+      marker.bindPopup(popup);
+      marker.on('popupopen', function(){
+        loadAllStacks().then(function(){
+          var rows = summarizeFromStacks(lat, lon, m) || [];
+          if (rows.length === 0) {
+            var el = document.getElementById('detail-'+m+'-'+(lat.toFixed(5)+','+lon.toFixed(5)).replace(/\\.|,/g,"_"));
+            if (el) el.innerHTML = '<span class="muted">No detailed rows found in combined file.</span>';
+            return;
+          }
+          var body = rows.map(function(r){
+            var lenSummary = (r.lenMin==null && r.lenMax==null) ? '—' :
+                             (r.lenMin==null ? ('med '+r.lenMed) :
+                               (r.lenMax==null ? ('med '+r.lenMed) :
+                                 (r.lenMin+'–'+r.lenMax+' (med '+(r.lenMed==null?'—':r.lenMed)+')')));
+            var ds = (r.dates||[]).join(', ');
+            return '<tr><td>'+r.week+'</td><td>'+r.sizeCat+'</td><td>'+r.count+'</td><td>'+lenSummary+' in</td><td style="max-width:240px;">'+ds+'</td></tr>';
+          }).join('');
+          var table = '<table class="popup-table"><tr><th>Week</th><th>Size</th><th>Count</th><th>Lengths</th><th>Dates</th></tr>'+body+'</table>';
+          var el = document.getElementById('detail-'+m+'-'+(lat.toFixed(5)+','+lon.toFixed(5)).replace(/\\.|,/g,"_"));
+          if (el) el.innerHTML = table;
+        });
+      });
+    }
+
+    // Data & rendering
+    var MONTH_FILES = {7: "bulltrout_jul.json", 8: "bulltrout_aug.json", 9: "bulltrout_sep.json"};
+    var monthData = {}; var totalRange = {min: Infinity, max: -Infinity};
+    function render() {
+      var enabled = []; if (document.getElementById('toggle-jul').checked) enabled.push(7);
+                        if (document.getElementById('toggle-aug').checked) enabled.push(8);
+                        if (document.getElementById('toggle-sep').checked) enabled.push(9);
+      if (enabled.length === 0) { layerGroup.clearLayers(); return; }
+
+      Promise.all(enabled.map(loadMonth)).then(function(){
+        var merged = mergeSites(enabled);
+        var bounds = map.getBounds();
+        layerGroup.clearLayers();
+
+        Object.values(merged).forEach(function(loc){
+          if (!bounds.contains([loc.lat, loc.lon])) return;
+          var monthsHere = Object.keys(loc.months).map(x=>parseInt(x));
+          var center = [loc.lat, loc.lon];
+
+          var petalR = 16; // px offset for multi-month
+          var offsets = {7:[0,-petalR], 8:[-petalR*0.87, petalR*0.5], 9:[petalR*0.87, petalR*0.5]};
+
+          monthsHere.forEach(function(m){
+            var site = loc.months[m];
+            var sPx = Math.round(sizePx(site.total, totalRange.min, totalRange.max));
+            var icon = makeSegmentedIcon(shapeForMonth(m), site.counts, site.total, strokeForMonth(m), sPx);
+
+            var anchor = icon.options.iconAnchor.slice();
+            if (monthsHere.length > 1) {
+              var d = offsets[m] || [0,0];
+              anchor = [anchor[0] + d[0], anchor[1] + d[1]];
+            }
+            var shiftedIcon = L.divIcon({
+              className: icon.options.className, html: icon.options.html,
+              iconSize: icon.options.iconSize, iconAnchor: anchor
+            });
+
+            var marker = L.marker(center, {icon: shiftedIcon}).addTo(layerGroup);
+            attachPopup(marker, loc.lat, loc.lon, m, site);
+          });
+        });
+      });
+    }
+
+    // Initial load (all months) so we have global min/max totals; then fit and render
+    Promise.all([loadMonth(7), loadMonth(8), loadMonth(9)]).then(function(){
+      var bounds = [];
+      [7,8,9].forEach(function(m){ (monthData[m].sites||[]).forEach(s => bounds.push([s.lat, s.lon])); });
+      if (bounds.length) map.fitBounds(bounds, {padding: [20,20]});
+      render();
+    });
+
+    map.on('moveend', scheduleRender);
+    map.on('zoomend', scheduleRender);
+  </script>
+</body>
+</html>
