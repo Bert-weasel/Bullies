@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bull Trout Map (Segmented + Sharded Details)</title>
+  <title>Bull Trout Map (Clean Build)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     html, body, #map { height: 100%; margin: 0; }
@@ -11,15 +11,23 @@
       position: absolute; top: 12px; left: 12px; z-index: 9999;
       background: white; padding: 10px 12px; border: 1px solid #999; border-radius: 6px;
       font-size: 13px; box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-      max-width: 340px;
+      max-width: 360px;
     }
     .legend {
       position: absolute; bottom: 20px; left: 20px; z-index: 9999;
       background: white; padding: 10px 12px; border: 1px solid #999; border-radius: 6px; font-size: 12px;
       box-shadow: 0 1px 3px rgba(0,0,0,0.2);
     }
+    .status {
+      position: absolute; top: 12px; right: 12px; z-index: 9999;
+      background: #fffbe6; padding: 8px 10px; border: 1px solid #e0d78a; border-radius: 6px; font-size: 12px;
+      color: #665c00; box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+    }
+    .error {
+      background: #ffecec; border-color: #ffb3b3; color: #7a0000;
+    }
     .popup-table { font-size: 12px; border-collapse: collapse; }
-    .popup-table th, .popup-table td { border: 1px solid #aaa; padding: 2px 4px; }
+    .popup-table th, .popup-table td { border: 1px solid #aaa; padding: 2px 4px; vertical-align: top; }
     .muted { color: #666; }
     .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #999; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -27,12 +35,13 @@
 </head>
 <body>
   <div id="map"></div>
+
   <div class="panel">
     <div><b>Filters</b></div>
     <label><input type="checkbox" id="toggle-jul" checked> July (triangle)</label><br>
     <label><input type="checkbox" id="toggle-aug" checked> August (star)</label><br>
     <label><input type="checkbox" id="toggle-sep" checked> September (circle)</label><br>
-    <div style="margin-top:6px;" class="muted">Markers render only inside the current view for speed. Click a marker to load details for that location/month.</div>
+    <div style="margin-top:6px;" class="muted">Markers render only inside the current view for speed.</div>
   </div>
 
   <div class="legend">
@@ -48,36 +57,97 @@
     <div style="margin-top:6px;">Icon size scales with count (min 20 px, max 40 px). Segment floor = 15%.</div>
   </div>
 
+  <div id="status" class="status">Loading…</div>
+
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    var map = L.map('map').setView([45.0, -114.0], 6);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 18,
-      attribution: '&copy; OpenStreetMap contributors'
-    }).addTo(map);
+  (function(){
+    'use strict';
 
-    var SIZE_ORDER = ["Small","Medium-small","Medium-large","Large","Extra-large"];
-    var COLOR = {"Small":"#1f77b4","Medium-small":"#ffffff","Medium-large":"#FFD700","Large":"#FF0000","Extra-large":"#000000"};
-    var MIN_PX = 20, MAX_PX = 40;
+    // Helpers for status messages
+    const statusEl = document.getElementById('status');
+    function setStatus(msg, isError=false) {
+      if (!statusEl) return;
+      statusEl.textContent = msg;
+      statusEl.className = 'status' + (isError ? ' error' : '');
+    }
+    function clearStatus() {
+      if (statusEl) statusEl.remove();
+    }
 
+    // Map init
+    let map;
+    try {
+      map = L.map('map').setView([45.0, -114.0], 6);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 18,
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+    } catch (e) {
+      setStatus('Map initialization error: ' + e.message, true);
+      return;
+    }
+
+    // Colors & ordering
+    const SIZE_ORDER = ["Small","Medium-small","Medium-large","Large","Extra-large"];
+    const COLOR = {"Small":"#1f77b4","Medium-small":"#ffffff","Medium-large":"#FFD700","Large":"#FF0000","Extra-large":"#000000"};
+
+    // Shapes
+    function trianglePath(size) {
+      const r = size/2, cx = r, cy = r;
+      const angle = -Math.PI/2;
+      const pts = [];
+      for (let i=0;i<3;i++) {
+        const a = angle + i*2*Math.PI/3;
+        pts.push([cx + r*Math.cos(a), cy + r*Math.sin(a)]);
+      }
+      return "M " + pts.map(p => p[0].toFixed(2)+","+p[1].toFixed(2)).join(" L ") + " Z";
+    }
+    function starPath(size, points=5, innerRatio=0.5) {
+      const r = size/2, cx = r, cy = r;
+      const path = [];
+      const angle = -Math.PI/2;
+      for (let i=0;i<points*2;i++) {
+        const rr = (i%2===0) ? r : r*innerRatio;
+        const a = angle + i*Math.PI/points;
+        const x = cx + rr*Math.cos(a), y = cy + rr*Math.sin(a);
+        path.push((i===0?"M ":"L ")+x.toFixed(2)+","+y.toFixed(2));
+      }
+      path.push("Z");
+      return path.join(" ");
+    }
+    function arcPath(cx, cy, r, startAngle, endAngle) {
+      const x1 = cx + r*Math.cos(startAngle), y1 = cy + r*Math.sin(startAngle);
+      const x2 = cx + r*Math.cos(endAngle),   y2 = cy + r*Math.sin(endAngle);
+      const largeArc = (endAngle - startAngle) > Math.PI ? 1 : 0;
+      return "M "+cx+","+cy+" L "+x1+","+y1+" A "+r+","+r+" 0 "+largeArc+" 1 "+x2+","+y2+" Z";
+    }
+
+    // Month shapes & strokes
+    function shapeForMonth(m) { return (m===7?'triangle':(m===8?'star':'circle')); }
+    function strokeForMonth(m) { return '#333'; }
+
+    // Sizing
+    const MIN_PX = 20, MAX_PX = 40;
     function sizePx(total, minTotal, maxTotal) {
       if (maxTotal === minTotal) return (MIN_PX + MAX_PX) / 2;
       return MIN_PX + (total - minTotal) * (MAX_PX - MIN_PX) / (maxTotal - minTotal);
     }
 
+    // Segment allocation with 15% floor
     function segmentFractions(counts) {
-      var present = SIZE_ORDER.filter(c => (counts[c]||0) > 0);
+      const present = SIZE_ORDER.filter(c => (counts[c]||0) > 0);
       if (present.length === 0) return [];
       if (present.length === 1) return [{cat: present[0], f: 1}];
-      var total = present.reduce((s,c)=>s+counts[c],0);
-      var raw = {}; present.forEach(c => raw[c] = counts[c]/total);
-      var floor = 0.15;
-      var floors = {}; present.forEach(c => floors[c] = Math.min(raw[c], floor));
-      var floorSum = present.reduce((s,c)=>s+floors[c],0);
-      var leftover = Math.max(0, 1 - floorSum);
-      var above = {}; present.forEach(c => above[c] = Math.max(0, raw[c]-floors[c]));
-      var aboveSum = present.reduce((s,c)=>s+above[c],0);
-      var frac = {};
+      const total = present.reduce((s,c)=>s+(counts[c]||0),0);
+      const raw = {}; present.forEach(c => raw[c] = (counts[c]||0)/total);
+      const floor = 0.15;
+      const floors = {}; present.forEach(c => floors[c] = Math.min(raw[c], floor));
+      const floorSum = present.reduce((s,c)=>s+floors[c],0);
+      const leftover = Math.max(0, 1 - floorSum);
+      const above = {}; present.forEach(c => above[c] = Math.max(0, raw[c]-floors[c]));
+      const aboveSum = present.reduce((s,c)=>s+above[c],0);
+      const frac = {};
       if (aboveSum > 0) {
         present.forEach(c => frac[c] = floors[c] + leftover * (above[c]/aboveSum));
       } else {
@@ -86,230 +156,121 @@
       return present.map(c => ({cat: c, f: frac[c]}));
     }
 
-    function trianglePath(size) {
-      var r = size/2, cx = r, cy = r;
-      var angle = -Math.PI/2;
-      var pts = [];
-      for (var i=0;i<3;i++) {
-        var a = angle + i*2*Math.PI/3;
-        pts.push([cx + r*Math.cos(a), cy + r*Math.sin(a)]);
-      }
-      return "M " + pts.map(p => p[0].toFixed(2)+","+p[1].toFixed(2)).join(" L ") + " Z";
-    }
-    function starPath(size, points=5, innerRatio=0.5) {
-      var r = size/2, cx = r, cy = r;
-      var path = [];
-      var angle = -Math.PI/2;
-      for (var i=0;i<points*2;i++) {
-        var rr = (i%2===0) ? r : r*innerRatio;
-        var a = angle + i*Math.PI/points;
-        var x = cx + rr*Math.cos(a), y = cy + rr*Math.sin(a);
-        path.push((i===0?"M ":"L ")+x.toFixed(2)+","+y.toFixed(2));
-      }
-      path.push("Z");
-      return path.join(" ");
-    }
-    function arcPath(cx, cy, r, startAngle, endAngle) {
-      var x1 = cx + r*Math.cos(startAngle), y1 = cy + r*Math.sin(startAngle);
-      var x2 = cx + r*Math.cos(endAngle),   y2 = cy + r*Math.sin(endAngle);
-      var largeArc = (endAngle - startAngle) > Math.PI ? 1 : 0;
-      return "M "+cx+","+cy+" L "+x1+","+y1+" A "+r+","+r+" 0 "+largeArc+" 1 "+x2+","+y2+" Z";
-    }
+    // Build segmented icon as inline SVG; solid fill if only one segment
+    function makeSegmentedIcon(shape, counts, total, strokeColor, size) {
+      const r = size/2, cx = r, cy = r;
+      let fracs = segmentFractions(counts);
 
-    function makeSegmentedIcon(shape, counts, total, strokeColor, sizePxVal) {
-      var size = sizePxVal;
-      var r = size/2, cx = r, cy = r;
-
-      // Determine fractions
-      var fracs = segmentFractions(counts);
-
-      // Build shape path/element first
-      var shapePath = "", shapeElem = "";
-      if (shape === "triangle") {
+      // Build shape path/element
+      let shapePath = "", shapeElem = "";
+      if (shape === 'triangle') {
         shapePath = trianglePath(size);
         shapeElem = '<path d="'+shapePath+'" />';
-      } else if (shape === "star") {
+      } else if (shape === 'star') {
         shapePath = starPath(size, 5, 0.5);
         shapeElem = '<path d="'+shapePath+'" />';
-      } else { // circle
+      } else {
         shapeElem = '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" />';
       }
 
-      // SPECIAL CASE: only one category -> draw a solid filled shape (avoid 360° arc degeneracy)
-      if (!fracs || fracs.length === 0) {
-        fracs = [{cat:"Small", f:1}];
-      }
+      // Single-segment: solid fill shape (avoid 360° arc degeneracy)
+      if (!fracs || fracs.length === 0) fracs = [{cat:'Small', f:1}];
       if (fracs.length === 1) {
-        var cat = fracs[0].cat;
-        var fill = COLOR[cat];
-        var outline;
-        var svg;
-        if (shape === "triangle" || shape === "star") {
-          outline = '<path d="'+(shape==="triangle"?shapePath:shapePath)+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
+        const fill = COLOR[fracs[0].cat];
+        let svg, outline;
+        if (shape === 'triangle' || shape === 'star') {
+          outline = '<path d="'+shapePath+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
           svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
-                '<path d="'+(shape==="triangle"?shapePath:shapePath)+'" fill="'+fill+'" />'+
-                outline+
-                '</svg>';
-        } else { // circle
+                '<path d="'+shapePath+'" fill="'+fill+'" />'+ outline + '</svg>';
+        } else {
           outline = '<circle cx="'+cx+'" cy="'+cy+'" r="'+(r-0.5)+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
           svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
-                '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="'+fill+'" />'+
-                outline+
-                '</svg>';
+                '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="'+fill+'" />'+ outline + '</svg>';
         }
-        return L.divIcon({
-          className: 'seg-icon',
-          html: svg,
-          iconSize: [size, size],
-          iconAnchor: [size/2, size/2]
-        });
+        return L.divIcon({ className: 'seg-icon', html: svg, iconSize: [size, size], iconAnchor: [size/2, size/2] });
       }
 
-      // Multi-segment pie with clipping to shape
-      var clipId = "clip-"+shape+"-"+Math.random().toString(36).slice(2);
-
-      var start = -Math.PI/2;
-      var wedges = "", separators = "";
-      fracs.forEach(function(seg){
-        var end = start + seg.f * Math.PI*2;
-        var path = arcPath(cx, cy, r, start, end);
-        var fill = COLOR[seg.cat];
+      // Multi-segment pie clipped to shape
+      const clipId = 'clip-'+shape+'-'+Math.random().toString(36).slice(2);
+      let start = -Math.PI/2;
+      let wedges = '', separators = '';
+      fracs.forEach(seg => {
+        const end = start + seg.f * Math.PI*2;
+        const path = arcPath(cx, cy, r, start, end);
+        const fill = COLOR[seg.cat];
         wedges += '<path d="'+path+'" fill="'+fill+'" stroke="#fff" stroke-width="0.75" />';
-        var sx = cx + r*Math.cos(end), sy = cy + r*Math.sin(end);
-        separators += '<line x1="'+cx+'" y1="'+cy+'" x2="'+sx+'" y2="'+sy+'" stroke="#fff" stroke-width="0.75"/>';
+        const sx = cx + r*Math.cos(end), sy = cy + r*Math.sin(end);
+        separators += '<line x1="'+cx+'" y1="'+cy+'" x2="'+sx+'" y2="'+sy+'" stroke="#fff" stroke-width="0.75" />';
         start = end;
       });
 
-      var outline;
-      if (shape === "triangle" || shape === "star") {
-        outline = '<path d="'+(shape==="triangle"?shapePath:shapePath)+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
-        var svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
-                  '<defs><clipPath id="'+clipId+'">'+shapeElem+'</clipPath></defs>'+
-                  '<g clip-path="url(#'+clipId+')">'+wedges+separators+'</g>'+
-                  outline+
-                  '</svg>';
-      } else { // circle
+      let outline, svg;
+      if (shape === 'triangle' || shape === 'star') {
+        outline = '<path d="'+shapePath+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
+        svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
+              '<defs><clipPath id="'+clipId+'">'+shapeElem+'</clipPath></defs>'+
+              '<g clip-path="url(#'+clipId+')">'+wedges+separators+'</g>'+ outline + '</svg>';
+      } else {
         outline = '<circle cx="'+cx+'" cy="'+cy+'" r="'+(r-0.5)+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
-        var svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
-                  '<g>'+wedges+separators+'</g>'+
-                  outline+
-                  '</svg>';
+        svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
+              '<g>'+wedges+separators+'</g>'+ outline + '</svg>';
       }
 
-      return L.divIcon({
-        className: 'seg-icon',
-        html: svg,
-        iconSize: [size, size],
-        iconAnchor: [size/2, size/2]
-      });
+      return L.divIcon({ className: 'seg-icon', html: svg, iconSize: [size, size], iconAnchor: [size/2, size/2] });
     }
 
-      var start = -Math.PI/2, wedges = "", separators = "";
-      fracs.forEach(function(seg){
-        var end = start + seg.f * Math.PI*2;
-        var path = arcPath(cx, cy, r, start, end);
-        var fill = COLOR[seg.cat];
-        wedges += '<path d="'+path+'" fill="'+fill+'" stroke="#fff" stroke-width="0.75" />';
-        var sx = cx + r*Math.cos(end), sy = cy + r*Math.sin(end);
-        separators += '<line x1="'+cx+'" y1="'+cy+'" x2="'+sx+'" y2="'+sy+'" stroke="#fff" stroke-width="0.75"/>';
-        start = end;
-      });
+    // Files
+    const MONTH_FILES = {7: 'bulltrout_jul.json', 8: 'bulltrout_aug.json', 9: 'bulltrout_sep.json'};
+    const DETAILS_FILE = 'bulltrout_data.json'; // existing combined file
 
-      var outline = (shape === "triangle" || shape === "star") ?
-        '<path d="'+shapePath+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />' :
-        '<circle cx="'+cx+'" cy="'+cy+'" r="'+(r-0.5)+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
+    const monthData = {};   // m -> {month, sites:[...]}
+    let allStacks = null;   // {stacks:[...]}
+    const totalRange = {min: Infinity, max: -Infinity};
 
-      var svg = (shape === "circle") ?
-        '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
-        '<g>'+wedges+separators+'</g>'+outline+'</svg>' :
-        '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
-        '<defs><clipPath id="'+clipId+'">'+shapeElem+'</clipPath></defs>'+
-        '<g clip-path="url(#'+clipId+')">'+wedges+separators+'</g>'+outline+'</svg>';
-
-      return L.divIcon({
-        className: 'seg-icon',
-        html: svg,
-        iconSize: [size, size],
-        iconAnchor: [size/2, size/2]
-      });
-    }
-
-    function shapeForMonth(m) { return (m===7?'triangle': (m===8?'star':'circle')); }
-    function strokeForMonth(m) { return '#333'; }
-
-    var MONTH_FILES = {7:"bulltrout_jul.json", 8:"bulltrout_aug.json", 9:"bulltrout_sep.json"};
-    var monthData = {};
-    var totalRange = {min: Infinity, max: -Infinity};
-
+    // Loaders
     function loadMonth(m) {
       if (monthData[m]) return Promise.resolve(monthData[m]);
-      return fetch(MONTH_FILES[m]).then(r => r.json()).then(j => {
+      return fetch(MONTH_FILES[m]).then(r => {
+        if (!r.ok) throw new Error('Failed to fetch '+MONTH_FILES[m]+' ('+r.status+')');
+        return r.json();
+      }).then(j => {
         monthData[m] = j;
-        j.sites.forEach(s => {
+        (j.sites||[]).forEach(s => {
           totalRange.min = Math.min(totalRange.min, s.total);
           totalRange.max = Math.max(totalRange.max, s.total);
         });
         return j;
       });
     }
-
-    // Per-location detail fetch (shards): details/<mon>/<file>.json
-    function detailPath(m, lat, lon) {
-      var name = (m===7?'jul': (m===8?'aug':'sep'));
-      var key = 'lat'+lat.toFixed(5)+'_lon'+lon.toFixed(5)+'.json';
-      return 'details/'+name+'/'+key;
+    function loadAllStacks() {
+      if (allStacks) return Promise.resolve(allStacks);
+      return fetch(DETAILS_FILE).then(r => {
+        if (!r.ok) throw new Error('Failed to fetch '+DETAILS_FILE+' ('+r.status+')');
+        return r.json();
+      }).then(j => { allStacks = j; return j; });
     }
 
-    function makePopupHtml(lat, lon, m, site) {
-      var html = '<div style="font-size:12px;"><b>Location:</b> '+lat.toFixed(5)+', '+lon.toFixed(5)+'<br>'+
-                 '<b>Month:</b> '+m+'<br>'+
-                 '<b>Total:</b> '+site.total+'<br>'+
-                 '<div>Details loading… <span class="spinner"></span></div>'+
-                 '<div id="d_'+m+'_'+lat.toFixed(5)+'_'+lon.toFixed(5)+'"></div></div>';
-      return html;
-    }
-
-    function attachPopup(marker, lat, lon, m, site) {
-      var popup = L.popup({maxWidth: 520}).setContent(makePopupHtml(lat, lon, m, site));
-      marker.bindPopup(popup);
-      marker.on('popupopen', function(){
-        var url = detailPath(m, lat, lon);
-        fetch(url).then(function(r){
-          if (!r.ok) throw new Error('Missing details shard');
-          return r.json();
-        }).then(function(j){
-          var rows = (j.records||[]).map(function(r){
-            var mm = (r.len_mm==null?'—':r.len_mm+' mm');
-            var inch = (r.len_in==null?'—':r.len_in+' in');
-            return '<tr><td>'+r.date+'</td><td>'+r.week+'</td><td>'+r.sizeCat+'</td><td>'+mm+'</td><td>'+inch+'</td></tr>';
-          }).join('');
-          var table = '<table class="popup-table"><tr><th>Date</th><th>Week</th><th>Size</th><th>Length</th><th>Length</th></tr>'+rows+'</table>';
-          var el = document.getElementById('d_'+m+'_'+lat.toFixed(5)+'_'+lon.toFixed(5));
-          if (el) el.innerHTML = table;
-        }).catch(function(err){
-          var el = document.getElementById('d_'+m+'_'+lat.toFixed(5)+'_'+lon.toFixed(5));
-          if (el) el.innerHTML = '<span class="muted">Details not available for this site.</span>';
-        });
-      });
-    }
-
-    var chkJul = document.getElementById('toggle-jul');
-    var chkAug = document.getElementById('toggle-aug');
-    var chkSep = document.getElementById('toggle-sep');
+    // UI
+    const chkJul = document.getElementById('toggle-jul');
+    const chkAug = document.getElementById('toggle-aug');
+    const chkSep = document.getElementById('toggle-sep');
     [chkJul, chkAug, chkSep].forEach(chk => chk.addEventListener('change', scheduleRender));
 
-    var layerGroup = L.layerGroup().addTo(map);
-    var renderScheduled = false;
-    function scheduleRender(){ if(!renderScheduled){ renderScheduled=true; requestAnimationFrame(()=>{renderScheduled=false; render();}); } }
-    function inBounds(lat, lon, bounds) { return bounds.contains([lat, lon]); }
+    // Layers
+    const layerGroup = L.layerGroup().addTo(map);
+    let renderScheduled = false;
+    function scheduleRender() {
+      if (renderScheduled) return;
+      renderScheduled = true;
+      requestAnimationFrame(() => { renderScheduled = false; render(); });
+    }
 
     function mergeSites(enabledMonths) {
-      var merged = {};
+      const merged = {}; // key -> {lat, lon, months: {m: site}}
       enabledMonths.forEach(m => {
-        var j = monthData[m];
-        if (!j) return;
-        j.sites.forEach(site => {
-          var key = site.lat.toFixed(5)+","+site.lon.toFixed(5);
+        const j = monthData[m]; if (!j) return;
+        (j.sites||[]).forEach(site => {
+          const key = site.lat.toFixed(5)+","+site.lon.toFixed(5);
           if (!merged[key]) merged[key] = {lat: site.lat, lon: site.lon, months: {}};
           merged[key].months[m] = site;
         });
@@ -317,49 +278,136 @@
       return merged;
     }
 
-    function render() {
-      var enabled = []; if (chkJul.checked) enabled.push(7); if (chkAug.checked) enabled.push(8); if (chkSep.checked) enabled.push(9);
-      if (enabled.length === 0) { layerGroup.clearLayers(); return; }
-      Promise.all(enabled.map(loadMonth)).then(function(){
-        var merged = mergeSites(enabled);
-        var bounds = map.getBounds();
-        layerGroup.clearLayers();
+    function summarizeFromStacks(lat, lon, month) {
+      if (!allStacks || !allStacks.stacks) return [];
+      const keyLat = Number(lat.toFixed(5)), keyLon = Number(lon.toFixed(5));
+      const subset = allStacks.stacks.filter(s =>
+        Math.abs(s.lat - keyLat) < 1e-5 && Math.abs(s.lon - keyLon) < 1e-5 && s.month === month
+      );
+      if (!subset.length) return [];
 
-        var petalR = 16;
-        var offsets = {7:[0,-petalR], 8:[-petalR*0.87, petalR*0.5], 9:[petalR*0.87, petalR*0.5]};
+      const rows = [];
+      subset.forEach(stack => {
+        (stack.items||[]).forEach(it => {
+          const lens = (it.lengths_in||[]).filter(x => x != null).slice().sort((a,b)=>a-b);
+          const count = it.count || lens.length || ((it.dates||[]).length);
+          let lenMin = null, lenMed = null, lenMax = null;
+          if (lens.length) {
+            lenMin = lens[0]; lenMax = lens[lens.length-1];
+            const mid = Math.floor(lens.length/2);
+            lenMed = (lens.length % 2 === 0) ? ( (lens[mid-1]+lens[mid])/2 ) : lens[mid];
+            lenMed = Math.round(lenMed*10)/10;
+          }
+          rows.push({ week: stack.week, sizeCat: it.sizeCat, count: count,
+                      lenMin: lenMin, lenMed: lenMed, lenMax: lenMax,
+                      dates: Array.from(new Set(it.dates||[])) });
+        });
+      });
+      rows.sort((a,b)=> (a.week!==b.week) ? (a.week-b.week) : (SIZE_ORDER.indexOf(a.sizeCat) - SIZE_ORDER.indexOf(b.sizeCat)));
+      return rows;
+    }
 
-        Object.values(merged).forEach(function(loc){
-          if (!inBounds(loc.lat, loc.lon, bounds)) return;
-          var monthsHere = Object.keys(loc.months).map(x=>parseInt(x));
-          var center = [loc.lat, loc.lon];
-          monthsHere.forEach(function(m){
-            var site = loc.months[m];
-            var total = site.total;
-            var sPx = Math.round(sizePx(total, totalRange.min, totalRange.max));
-            var shape = (m===7?'triangle': (m===8?'star':'circle'));
-            var icon = makeSegmentedIcon(shape, site.counts, total, '#333', sPx);
-            var anchor = [sPx/2, sPx/2];
-            if (monthsHere.length > 1) {
-              var d = offsets[m] || [0,0];
-              anchor = [anchor[0] + d[0], anchor[1] + d[1]];
-            }
-            var shiftedIcon = L.divIcon({className: 'seg-icon', html: icon.options.html, iconSize: [sPx, sPx], iconAnchor: anchor});
-            var marker = L.marker(center, {icon: shiftedIcon}).addTo(layerGroup);
-            attachPopup(marker, loc.lat, loc.lon, m, site);
-          });
+    function popupHtml(lat, lon, m, site) {
+      const key = lat.toFixed(5)+","+lon.toFixed(5);
+      const spin = '<span class="spinner"></span>';
+      return '<div style="font-size:12px;"><b>Location:</b> '+lat.toFixed(5)+', '+lon.toFixed(5)+'<br>'+
+             '<b>Month:</b> '+m+' &nbsp; <b>Total (month):</b> '+site.total+'<br>'+
+             '<div id="detail-'+m+'-'+key.replace(/\\.|,/g,"_")+'">Loading details '+spin+'...</div></div>';
+    }
+
+    function attachPopup(marker, lat, lon, m, site) {
+      const popup = L.popup({maxWidth: 560}).setContent(popupHtml(lat, lon, m, site));
+      marker.bindPopup(popup);
+      marker.on('popupopen', function(){
+        loadAllStacks().then(() => {
+          const rows = summarizeFromStacks(lat, lon, m);
+          const divId = 'detail-'+m+'-'+(lat.toFixed(5)+','+lon.toFixed(5)).replace(/\\.|,/g,"_");
+          const el = document.getElementById(divId);
+          if (!el) return;
+          if (!rows.length) { el.innerHTML = '<span class="muted">No detailed rows found in combined file.</span>'; return; }
+          const body = rows.map(r => {
+            const lenSummary = (r.lenMin==null && r.lenMax==null) ? '—' :
+                               (r.lenMin==null ? ('med '+r.lenMed) :
+                                 (r.lenMax==null ? ('med '+r.lenMed) :
+                                   (r.lenMin+'–'+r.lenMax+' (med '+(r.lenMed==null?'—':r.lenMed)+')')));
+            const ds = (r.dates||[]).join(', ');
+            return '<tr><td>'+r.week+'</td><td>'+r.sizeCat+'</td><td>'+r.count+'</td><td>'+lenSummary+' in</td><td style="max-width:240px;">'+ds+'</td></tr>';
+          }).join('');
+          el.innerHTML = '<table class="popup-table"><tr><th>Week</th><th>Size</th><th>Count</th><th>Lengths</th><th>Dates</th></tr>'+body+'</table>';
+        }).catch(err => {
+          const divId = 'detail-'+m+'-'+(lat.toFixed(5)+','+lon.toFixed(5)).replace(/\\.|,/g,"_");
+          const el = document.getElementById(divId);
+          if (el) el.innerHTML = '<span class="muted">Error loading details: '+err.message+'</span>';
         });
       });
     }
 
-    Promise.all([loadMonth(7), loadMonth(8), loadMonth(9)]).then(function(){
-      var bounds = [];
-      [7,8,9].forEach(function(m){ (monthData[m].sites||[]).forEach(function(s){ bounds.push([s.lat, s.lon]); }); });
-      if (bounds.length) map.fitBounds(bounds, {padding:[20,20]});
+    // Rendering
+    const chkJul = document.getElementById('toggle-jul');
+    const chkAug = document.getElementById('toggle-aug');
+    const chkSep = document.getElementById('toggle-sep');
+    const layerGroup = L.layerGroup().addTo(map);
+    let renderScheduled = false;
+
+    function inBounds(lat, lon, bounds) { return bounds.contains([lat, lon]); }
+
+    function render() {
+      const enabled = [];
+      if (chkJul.checked) enabled.push(7);
+      if (chkAug.checked) enabled.push(8);
+      if (chkSep.checked) enabled.push(9);
+      if (enabled.length === 0) { layerGroup.clearLayers(); return; }
+
+      Promise.all(enabled.map(loadMonth)).then(() => {
+        const merged = mergeSites(enabled);
+        const bounds = map.getBounds();
+
+        layerGroup.clearLayers();
+
+        const monthsHereOffsets = {7:[0,-16], 8:[-13.9, 8], 9:[13.9, 8]}; // triangle up; star left-down; circle right-down
+        Object.values(merged).forEach(loc => {
+          if (!inBounds(loc.lat, loc.lon, bounds)) return;
+          const monthsHere = Object.keys(loc.months).map(x=>parseInt(x));
+          const center = [loc.lat, loc.lon];
+
+          monthsHere.forEach(m => {
+            const site = loc.months[m];
+            const total = site.total;
+            const size = Math.round(sizePx(total, totalRange.min, totalRange.max));
+            const icon = makeSegmentedIcon(shapeForMonth(m), site.counts, total, strokeForMonth(m), size);
+
+            let anchor = icon.options.iconAnchor.slice();
+            if (monthsHere.length > 1) {
+              const d = monthsHereOffsets[m] || [0,0];
+              anchor = [anchor[0] + d[0], anchor[1] + d[1]];
+            }
+            const shiftedIcon = L.divIcon({ className: icon.options.className, html: icon.options.html, iconSize: icon.options.iconSize, iconAnchor: anchor });
+            const marker = L.marker(center, {icon: shiftedIcon}).addTo(layerGroup);
+            attachPopup(marker, loc.lat, loc.lon, m, site);
+          });
+        });
+      }).catch(err => {
+        setStatus('Render error: '+err.message, true);
+      });
+    }
+
+    // Initial load: fetch all months for global size range, then fit & render
+    Promise.all([loadMonth(7), loadMonth(8), loadMonth(9)]).then(() => {
+      // Fit to all points
+      const bounds = [];
+      [7,8,9].forEach(m => (monthData[m].sites||[]).forEach(s => bounds.push([s.lat, s.lon])));
+      if (bounds.length) map.fitBounds(bounds, {padding: [20,20]});
+      setStatus('Ready');
+      setTimeout(clearStatus, 1200);
       render();
+    }).catch(err => {
+      setStatus('Load error: '+err.message, true);
     });
 
-    map.on('moveend', scheduleRender);
-    map.on('zoomend', scheduleRender);
+    map.on('moveend', () => { if (!renderScheduled) { renderScheduled = true; requestAnimationFrame(() => { renderScheduled = false; render(); }); } });
+    map.on('zoomend', () => { if (!renderScheduled) { renderScheduled = true; requestAnimationFrame(() => { renderScheduled = false; render(); }); } });
+
+  })();
   </script>
 </body>
 </html>
