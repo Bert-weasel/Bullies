@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bull Trout Map (Segmented + Viewport + Details from bulltrout_data.json)</title>
+  <title>Bull Trout Map (Segmented + Sharded Details)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     html, body, #map { height: 100%; margin: 0; }
@@ -19,7 +19,7 @@
       box-shadow: 0 1px 3px rgba(0,0,0,0.2);
     }
     .popup-table { font-size: 12px; border-collapse: collapse; }
-    .popup-table th, .popup-table td { border: 1px solid #aaa; padding: 2px 4px; vertical-align: top; }
+    .popup-table th, .popup-table td { border: 1px solid #aaa; padding: 2px 4px; }
     .muted { color: #666; }
     .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #999; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -32,7 +32,7 @@
     <label><input type="checkbox" id="toggle-jul" checked> July (triangle)</label><br>
     <label><input type="checkbox" id="toggle-aug" checked> August (star)</label><br>
     <label><input type="checkbox" id="toggle-sep" checked> September (circle)</label><br>
-    <div style="margin-top:6px;" class="muted">Markers render only inside the current view for speed.</div>
+    <div style="margin-top:6px;" class="muted">Markers render only inside the current view for speed. Click a marker to load details for that location/month.</div>
   </div>
 
   <div class="legend">
@@ -50,34 +50,21 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    // Map init
     var map = L.map('map').setView([45.0, -114.0], 6);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 18,
       attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
 
-    // Color map (size categories)
     var SIZE_ORDER = ["Small","Medium-small","Medium-large","Large","Extra-large"];
     var COLOR = {"Small":"#1f77b4","Medium-small":"#ffffff","Medium-large":"#FFD700","Large":"#FF0000","Extra-large":"#000000"};
+    var MIN_PX = 20, MAX_PX = 40;
 
-    // Month shapes & strokes
-    function shapeForMonth(m) {
-      if (m === 7) return "triangle";
-      if (m === 8) return "star";
-      if (m === 9) return "circle";
-      return "circle";
-    }
-    function strokeForMonth(m) { return "#333"; }
-
-    // Sizing range
-    var MIN_PX = 20, MAX_PX = 40; // 2x range
     function sizePx(total, minTotal, maxTotal) {
       if (maxTotal === minTotal) return (MIN_PX + MAX_PX) / 2;
       return MIN_PX + (total - minTotal) * (MAX_PX - MIN_PX) / (maxTotal - minTotal);
     }
 
-    // Segment allocation with 15% floor
     function segmentFractions(counts) {
       var present = SIZE_ORDER.filter(c => (counts[c]||0) > 0);
       if (present.length === 0) return [];
@@ -99,7 +86,6 @@
       return present.map(c => ({cat: c, f: frac[c]}));
     }
 
-    // SVG helper functions
     function trianglePath(size) {
       var r = size/2, cx = r, cy = r;
       var angle = -Math.PI/2;
@@ -133,10 +119,11 @@
     function makeSegmentedIcon(shape, counts, total, strokeColor, sizePxVal) {
       var size = sizePxVal;
       var r = size/2, cx = r, cy = r;
-      var fracs = segmentFractions(counts);
-      if (fracs.length === 0) fracs = [{cat:"Small", f:1}];
 
-      var clipId = "clip-"+shape+"-"+Math.random().toString(36).slice(2);
+      // Determine fractions
+      var fracs = segmentFractions(counts);
+
+      // Build shape path/element first
       var shapePath = "", shapeElem = "";
       if (shape === "triangle") {
         shapePath = trianglePath(size);
@@ -144,9 +131,42 @@
       } else if (shape === "star") {
         shapePath = starPath(size, 5, 0.5);
         shapeElem = '<path d="'+shapePath+'" />';
-      } else {
+      } else { // circle
         shapeElem = '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" />';
       }
+
+      // SPECIAL CASE: only one category -> draw a solid filled shape (avoid 360° arc degeneracy)
+      if (!fracs || fracs.length === 0) {
+        fracs = [{cat:"Small", f:1}];
+      }
+      if (fracs.length === 1) {
+        var cat = fracs[0].cat;
+        var fill = COLOR[cat];
+        var outline;
+        var svg;
+        if (shape === "triangle" || shape === "star") {
+          outline = '<path d="'+(shape==="triangle"?shapePath:shapePath)+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
+          svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
+                '<path d="'+(shape==="triangle"?shapePath:shapePath)+'" fill="'+fill+'" />'+
+                outline+
+                '</svg>';
+        } else { // circle
+          outline = '<circle cx="'+cx+'" cy="'+cy+'" r="'+(r-0.5)+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
+          svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
+                '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="'+fill+'" />'+
+                outline+
+                '</svg>';
+        }
+        return L.divIcon({
+          className: 'seg-icon',
+          html: svg,
+          iconSize: [size, size],
+          iconAnchor: [size/2, size/2]
+        });
+      }
+
+      // Multi-segment pie with clipping to shape
+      var clipId = "clip-"+shape+"-"+Math.random().toString(36).slice(2);
 
       var start = -Math.PI/2;
       var wedges = "", separators = "";
@@ -154,28 +174,26 @@
         var end = start + seg.f * Math.PI*2;
         var path = arcPath(cx, cy, r, start, end);
         var fill = COLOR[seg.cat];
-        var stroke = (seg.cat === "Medium-small") ? "#000000" : fill;
         wedges += '<path d="'+path+'" fill="'+fill+'" stroke="#fff" stroke-width="0.75" />';
         var sx = cx + r*Math.cos(end), sy = cy + r*Math.sin(end);
         separators += '<line x1="'+cx+'" y1="'+cy+'" x2="'+sx+'" y2="'+sy+'" stroke="#fff" stroke-width="0.75"/>';
         start = end;
       });
 
-      var outline = "";
+      var outline;
       if (shape === "triangle" || shape === "star") {
-        outline = '<path d="'+shapePath+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
-      } else {
+        outline = '<path d="'+(shape==="triangle"?shapePath:shapePath)+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
+        var svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
+                  '<defs><clipPath id="'+clipId+'">'+shapeElem+'</clipPath></defs>'+
+                  '<g clip-path="url(#'+clipId+')">'+wedges+separators+'</g>'+
+                  outline+
+                  '</svg>';
+      } else { // circle
         outline = '<circle cx="'+cx+'" cy="'+cy+'" r="'+(r-0.5)+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
-      }
-
-      var svg;
-      if (shape === "circle") {
-        svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
-              '<g>'+wedges+separators+'</g>'+outline+'</svg>';
-      } else {
-        svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
-              '<defs><clipPath id="'+clipId+'">'+shapeElem+'</clipPath></defs>'+
-              '<g clip-path="url(#'+clipId+')">'+wedges+separators+'</g>'+outline+'</svg>';
+        var svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
+                  '<g>'+wedges+separators+'</g>'+
+                  outline+
+                  '</svg>';
       }
 
       return L.divIcon({
@@ -186,12 +204,41 @@
       });
     }
 
-    // Files
-    var MONTH_FILES = {7: "bulltrout_jul.json", 8: "bulltrout_aug.json", 9: "bulltrout_sep.json"};
-    var DETAILS_FILE = "bulltrout_data.json"; // use existing combined data
+      var start = -Math.PI/2, wedges = "", separators = "";
+      fracs.forEach(function(seg){
+        var end = start + seg.f * Math.PI*2;
+        var path = arcPath(cx, cy, r, start, end);
+        var fill = COLOR[seg.cat];
+        wedges += '<path d="'+path+'" fill="'+fill+'" stroke="#fff" stroke-width="0.75" />';
+        var sx = cx + r*Math.cos(end), sy = cy + r*Math.sin(end);
+        separators += '<line x1="'+cx+'" y1="'+cy+'" x2="'+sx+'" y2="'+sy+'" stroke="#fff" stroke-width="0.75"/>';
+        start = end;
+      });
 
-    var monthData = {}; // m -> {month, sites:[...]}
-    var allStacks = null; // {stacks:[...]} from bulltrout_data.json
+      var outline = (shape === "triangle" || shape === "star") ?
+        '<path d="'+shapePath+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />' :
+        '<circle cx="'+cx+'" cy="'+cy+'" r="'+(r-0.5)+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
+
+      var svg = (shape === "circle") ?
+        '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
+        '<g>'+wedges+separators+'</g>'+outline+'</svg>' :
+        '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
+        '<defs><clipPath id="'+clipId+'">'+shapeElem+'</clipPath></defs>'+
+        '<g clip-path="url(#'+clipId+')">'+wedges+separators+'</g>'+outline+'</svg>';
+
+      return L.divIcon({
+        className: 'seg-icon',
+        html: svg,
+        iconSize: [size, size],
+        iconAnchor: [size/2, size/2]
+      });
+    }
+
+    function shapeForMonth(m) { return (m===7?'triangle': (m===8?'star':'circle')); }
+    function strokeForMonth(m) { return '#333'; }
+
+    var MONTH_FILES = {7:"bulltrout_jul.json", 8:"bulltrout_aug.json", 9:"bulltrout_sep.json"};
+    var monthData = {};
     var totalRange = {min: Infinity, max: -Infinity};
 
     function loadMonth(m) {
@@ -205,32 +252,62 @@
         return j;
       });
     }
-    function loadAllStacks() {
-      if (allStacks) return Promise.resolve(allStacks);
-      return fetch(DETAILS_FILE).then(r => r.json()).then(j => { allStacks = j; return j; });
+
+    // Per-location detail fetch (shards): details/<mon>/<file>.json
+    function detailPath(m, lat, lon) {
+      var name = (m===7?'jul': (m===8?'aug':'sep'));
+      var key = 'lat'+lat.toFixed(5)+'_lon'+lon.toFixed(5)+'.json';
+      return 'details/'+name+'/'+key;
     }
 
-    // UI toggles
+    function makePopupHtml(lat, lon, m, site) {
+      var html = '<div style="font-size:12px;"><b>Location:</b> '+lat.toFixed(5)+', '+lon.toFixed(5)+'<br>'+
+                 '<b>Month:</b> '+m+'<br>'+
+                 '<b>Total:</b> '+site.total+'<br>'+
+                 '<div>Details loading… <span class="spinner"></span></div>'+
+                 '<div id="d_'+m+'_'+lat.toFixed(5)+'_'+lon.toFixed(5)+'"></div></div>';
+      return html;
+    }
+
+    function attachPopup(marker, lat, lon, m, site) {
+      var popup = L.popup({maxWidth: 520}).setContent(makePopupHtml(lat, lon, m, site));
+      marker.bindPopup(popup);
+      marker.on('popupopen', function(){
+        var url = detailPath(m, lat, lon);
+        fetch(url).then(function(r){
+          if (!r.ok) throw new Error('Missing details shard');
+          return r.json();
+        }).then(function(j){
+          var rows = (j.records||[]).map(function(r){
+            var mm = (r.len_mm==null?'—':r.len_mm+' mm');
+            var inch = (r.len_in==null?'—':r.len_in+' in');
+            return '<tr><td>'+r.date+'</td><td>'+r.week+'</td><td>'+r.sizeCat+'</td><td>'+mm+'</td><td>'+inch+'</td></tr>';
+          }).join('');
+          var table = '<table class="popup-table"><tr><th>Date</th><th>Week</th><th>Size</th><th>Length</th><th>Length</th></tr>'+rows+'</table>';
+          var el = document.getElementById('d_'+m+'_'+lat.toFixed(5)+'_'+lon.toFixed(5));
+          if (el) el.innerHTML = table;
+        }).catch(function(err){
+          var el = document.getElementById('d_'+m+'_'+lat.toFixed(5)+'_'+lon.toFixed(5));
+          if (el) el.innerHTML = '<span class="muted">Details not available for this site.</span>';
+        });
+      });
+    }
+
     var chkJul = document.getElementById('toggle-jul');
     var chkAug = document.getElementById('toggle-aug');
     var chkSep = document.getElementById('toggle-sep');
     [chkJul, chkAug, chkSep].forEach(chk => chk.addEventListener('change', scheduleRender));
 
-    // Layer management
     var layerGroup = L.layerGroup().addTo(map);
     var renderScheduled = false;
-    function scheduleRender() {
-      if (renderScheduled) return;
-      renderScheduled = true;
-      requestAnimationFrame(function(){ renderScheduled = false; render(); });
-    }
-
+    function scheduleRender(){ if(!renderScheduled){ renderScheduled=true; requestAnimationFrame(()=>{renderScheduled=false; render();}); } }
     function inBounds(lat, lon, bounds) { return bounds.contains([lat, lon]); }
 
     function mergeSites(enabledMonths) {
-      var merged = {}; // key -> {lat, lon, months: {m: site}}
+      var merged = {};
       enabledMonths.forEach(m => {
-        var j = monthData[m]; if (!j) return;
+        var j = monthData[m];
+        if (!j) return;
         j.sites.forEach(site => {
           var key = site.lat.toFixed(5)+","+site.lon.toFixed(5);
           if (!merged[key]) merged[key] = {lat: site.lat, lon: site.lon, months: {}};
@@ -240,117 +317,33 @@
       return merged;
     }
 
-    function summarizeFromStacks(lat, lon, month) {
-      // Using allStacks.stacks: [{lat, lon, month, week, items:[{sizeCat,count,dates[],lengths_in[]}, ...]}]
-      if (!allStacks || !allStacks.stacks) return null;
-      var keyLat = Number(lat.toFixed(5)), keyLon = Number(lon.toFixed(5));
-      var subset = allStacks.stacks.filter(s => Math.abs(s.lat - keyLat) < 1e-5 && Math.abs(s.lon - keyLon) < 1e-5 && s.month === month);
-      if (subset.length === 0) return null;
-
-      // Build rows aggregated by week & sizeCat with counts and length summaries
-      var rows = []; // {week, sizeCat, count, lenMin, lenMed, lenMax, dates}
-      subset.forEach(function(stack){
-        (stack.items || []).forEach(function(it){
-          var lens = (it.lengths_in || []).filter(x => x != null).slice().sort(function(a,b){return a-b;});
-          var count = it.count || lens.length || ((it.dates||[]).length);
-          var lenMin = lens.length ? lens[0] : null;
-          var lenMax = lens.length ? lens[lens.length-1] : null;
-          var lenMed = null;
-          if (lens.length) {
-            var mid = Math.floor(lens.length/2);
-            lenMed = (lens.length % 2 === 0) ? ( (lens[mid-1]+lens[mid])/2 ) : lens[mid];
-            lenMed = Math.round(lenMed*10)/10;
-          }
-          rows.push({
-            week: stack.week,
-            sizeCat: it.sizeCat,
-            count: count,
-            lenMin: lenMin, lenMed: lenMed, lenMax: lenMax,
-            dates: Array.from(new Set(it.dates || []))
-          });
-        });
-      });
-
-      // Sort by week asc, then size order
-      rows.sort(function(a,b){
-        if (a.week !== b.week) return a.week - b.week;
-        return SIZE_ORDER.indexOf(a.sizeCat) - SIZE_ORDER.indexOf(b.sizeCat);
-      });
-      return rows;
-    }
-
-    function popupHtml(lat, lon, m, site) {
-      var key = lat.toFixed(5)+","+lon.toFixed(5);
-      var spinner = '<span class="spinner"></span>';
-      var html = '<div style="font-size:12px;"><b>Location:</b> '+lat.toFixed(5)+', '+lon.toFixed(5)+'<br>'+
-                 '<b>Month:</b> '+m+' &nbsp; <b>Total (month):</b> '+site.total+'<br>'+
-                 '<div id="detail-'+m+'-'+key.replace(/\\.|,/g,"_")+'">Loading details '+spinner+'...</div></div>';
-      return html;
-    }
-
-    function attachPopup(marker, lat, lon, m, site) {
-      var popup = L.popup({maxWidth: 560}).setContent(popupHtml(lat, lon, m, site));
-      marker.bindPopup(popup);
-      marker.on('popupopen', function(){
-        loadAllStacks().then(function(){
-          var rows = summarizeFromStacks(lat, lon, m) || [];
-          if (rows.length === 0) {
-            var el = document.getElementById('detail-'+m+'-'+(lat.toFixed(5)+','+lon.toFixed(5)).replace(/\\.|,/g,"_"));
-            if (el) el.innerHTML = '<span class="muted">No detailed rows found in combined file.</span>';
-            return;
-          }
-          var body = rows.map(function(r){
-            var lenSummary = (r.lenMin==null && r.lenMax==null) ? '—' :
-                             (r.lenMin==null ? ('med '+r.lenMed) :
-                               (r.lenMax==null ? ('med '+r.lenMed) :
-                                 (r.lenMin+'–'+r.lenMax+' (med '+(r.lenMed==null?'—':r.lenMed)+')')));
-            var ds = (r.dates||[]).join(', ');
-            return '<tr><td>'+r.week+'</td><td>'+r.sizeCat+'</td><td>'+r.count+'</td><td>'+lenSummary+' in</td><td style="max-width:240px;">'+ds+'</td></tr>';
-          }).join('');
-          var table = '<table class="popup-table"><tr><th>Week</th><th>Size</th><th>Count</th><th>Lengths</th><th>Dates</th></tr>'+body+'</table>';
-          var el = document.getElementById('detail-'+m+'-'+(lat.toFixed(5)+','+lon.toFixed(5)).replace(/\\.|,/g,"_"));
-          if (el) el.innerHTML = table;
-        });
-      });
-    }
-
-    // Data & rendering
-    var MONTH_FILES = {7: "bulltrout_jul.json", 8: "bulltrout_aug.json", 9: "bulltrout_sep.json"};
-    var monthData = {}; var totalRange = {min: Infinity, max: -Infinity};
     function render() {
-      var enabled = []; if (document.getElementById('toggle-jul').checked) enabled.push(7);
-                        if (document.getElementById('toggle-aug').checked) enabled.push(8);
-                        if (document.getElementById('toggle-sep').checked) enabled.push(9);
+      var enabled = []; if (chkJul.checked) enabled.push(7); if (chkAug.checked) enabled.push(8); if (chkSep.checked) enabled.push(9);
       if (enabled.length === 0) { layerGroup.clearLayers(); return; }
-
       Promise.all(enabled.map(loadMonth)).then(function(){
         var merged = mergeSites(enabled);
         var bounds = map.getBounds();
         layerGroup.clearLayers();
 
+        var petalR = 16;
+        var offsets = {7:[0,-petalR], 8:[-petalR*0.87, petalR*0.5], 9:[petalR*0.87, petalR*0.5]};
+
         Object.values(merged).forEach(function(loc){
-          if (!bounds.contains([loc.lat, loc.lon])) return;
+          if (!inBounds(loc.lat, loc.lon, bounds)) return;
           var monthsHere = Object.keys(loc.months).map(x=>parseInt(x));
           var center = [loc.lat, loc.lon];
-
-          var petalR = 16; // px offset for multi-month
-          var offsets = {7:[0,-petalR], 8:[-petalR*0.87, petalR*0.5], 9:[petalR*0.87, petalR*0.5]};
-
           monthsHere.forEach(function(m){
             var site = loc.months[m];
-            var sPx = Math.round(sizePx(site.total, totalRange.min, totalRange.max));
-            var icon = makeSegmentedIcon(shapeForMonth(m), site.counts, site.total, strokeForMonth(m), sPx);
-
-            var anchor = icon.options.iconAnchor.slice();
+            var total = site.total;
+            var sPx = Math.round(sizePx(total, totalRange.min, totalRange.max));
+            var shape = (m===7?'triangle': (m===8?'star':'circle'));
+            var icon = makeSegmentedIcon(shape, site.counts, total, '#333', sPx);
+            var anchor = [sPx/2, sPx/2];
             if (monthsHere.length > 1) {
               var d = offsets[m] || [0,0];
               anchor = [anchor[0] + d[0], anchor[1] + d[1]];
             }
-            var shiftedIcon = L.divIcon({
-              className: icon.options.className, html: icon.options.html,
-              iconSize: icon.options.iconSize, iconAnchor: anchor
-            });
-
+            var shiftedIcon = L.divIcon({className: 'seg-icon', html: icon.options.html, iconSize: [sPx, sPx], iconAnchor: anchor});
             var marker = L.marker(center, {icon: shiftedIcon}).addTo(layerGroup);
             attachPopup(marker, loc.lat, loc.lon, m, site);
           });
@@ -358,11 +351,10 @@
       });
     }
 
-    // Initial load (all months) so we have global min/max totals; then fit and render
     Promise.all([loadMonth(7), loadMonth(8), loadMonth(9)]).then(function(){
       var bounds = [];
-      [7,8,9].forEach(function(m){ (monthData[m].sites||[]).forEach(s => bounds.push([s.lat, s.lon])); });
-      if (bounds.length) map.fitBounds(bounds, {padding: [20,20]});
+      [7,8,9].forEach(function(m){ (monthData[m].sites||[]).forEach(function(s){ bounds.push([s.lat, s.lon]); }); });
+      if (bounds.length) map.fitBounds(bounds, {padding:[20,20]});
       render();
     });
 
