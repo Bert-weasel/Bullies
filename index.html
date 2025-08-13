@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bull Trout Map (Clean Build)</title>
+  <title>Bull Trout Map (Fixed)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     html, body, #map { height: 100%; margin: 0; }
@@ -23,9 +23,7 @@
       background: #fffbe6; padding: 8px 10px; border: 1px solid #e0d78a; border-radius: 6px; font-size: 12px;
       color: #665c00; box-shadow: 0 1px 3px rgba(0,0,0,0.15);
     }
-    .error {
-      background: #ffecec; border-color: #ffb3b3; color: #7a0000;
-    }
+    .error { background: #ffecec; border-color: #ffb3b3; color: #7a0000; }
     .popup-table { font-size: 12px; border-collapse: collapse; }
     .popup-table th, .popup-table td { border: 1px solid #aaa; padding: 2px 4px; vertical-align: top; }
     .muted { color: #666; }
@@ -64,18 +62,17 @@
   (function(){
     'use strict';
 
-    // Helpers for status messages
+    // --- Status helpers ---
     const statusEl = document.getElementById('status');
     function setStatus(msg, isError=false) {
       if (!statusEl) return;
       statusEl.textContent = msg;
       statusEl.className = 'status' + (isError ? ' error' : '');
+      console[(isError?'error':'log')](msg);
     }
-    function clearStatus() {
-      if (statusEl) statusEl.remove();
-    }
+    function clearStatusSoon() { setTimeout(()=>{ if (statusEl) statusEl.remove(); }, 1200); }
 
-    // Map init
+    // --- Map init ---
     let map;
     try {
       map = L.map('map').setView([45.0, -114.0], 6);
@@ -88,11 +85,15 @@
       return;
     }
 
-    // Colors & ordering
+    // --- Constants ---
     const SIZE_ORDER = ["Small","Medium-small","Medium-large","Large","Extra-large"];
     const COLOR = {"Small":"#1f77b4","Medium-small":"#ffffff","Medium-large":"#FFD700","Large":"#FF0000","Extra-large":"#000000"};
+    const MONTH_FILES = {7: 'bulltrout_jul.json', 8: 'bulltrout_aug.json', 9: 'bulltrout_sep.json'};
+    const DETAILS_FILE = 'bulltrout_data.json';
 
-    // Shapes
+    const MIN_PX = 20, MAX_PX = 40;
+
+    // --- Shape helpers ---
     function trianglePath(size) {
       const r = size/2, cx = r, cy = r;
       const angle = -Math.PI/2;
@@ -122,19 +123,15 @@
       const largeArc = (endAngle - startAngle) > Math.PI ? 1 : 0;
       return "M "+cx+","+cy+" L "+x1+","+y1+" A "+r+","+r+" 0 "+largeArc+" 1 "+x2+","+y2+" Z";
     }
-
-    // Month shapes & strokes
     function shapeForMonth(m) { return (m===7?'triangle':(m===8?'star':'circle')); }
     function strokeForMonth(m) { return '#333'; }
 
-    // Sizing
-    const MIN_PX = 20, MAX_PX = 40;
     function sizePx(total, minTotal, maxTotal) {
       if (maxTotal === minTotal) return (MIN_PX + MAX_PX) / 2;
       return MIN_PX + (total - minTotal) * (MAX_PX - MIN_PX) / (maxTotal - minTotal);
     }
 
-    // Segment allocation with 15% floor
+    // --- Segments with 15% floor ---
     function segmentFractions(counts) {
       const present = SIZE_ORDER.filter(c => (counts[c]||0) > 0);
       if (present.length === 0) return [];
@@ -156,7 +153,7 @@
       return present.map(c => ({cat: c, f: frac[c]}));
     }
 
-    // Build segmented icon as inline SVG; solid fill if only one segment
+    // --- Build a segmented icon as inline SVG; solid fill if single segment ---
     function makeSegmentedIcon(shape, counts, total, strokeColor, size) {
       const r = size/2, cx = r, cy = r;
       let fracs = segmentFractions(counts);
@@ -173,11 +170,11 @@
         shapeElem = '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" />';
       }
 
-      // Single-segment: solid fill shape (avoid 360° arc degeneracy)
+      // Single segment -> solid fill
       if (!fracs || fracs.length === 0) fracs = [{cat:'Small', f:1}];
       if (fracs.length === 1) {
         const fill = COLOR[fracs[0].cat];
-        let svg, outline;
+        let outline, svg;
         if (shape === 'triangle' || shape === 'star') {
           outline = '<path d="'+shapePath+'" fill="none" stroke="'+strokeColor+'" stroke-width="1" />';
           svg = '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" xmlns="http://www.w3.org/2000/svg">'+
@@ -219,21 +216,21 @@
       return L.divIcon({ className: 'seg-icon', html: svg, iconSize: [size, size], iconAnchor: [size/2, size/2] });
     }
 
-    // Files
-    const MONTH_FILES = {7: 'bulltrout_jul.json', 8: 'bulltrout_aug.json', 9: 'bulltrout_sep.json'};
-    const DETAILS_FILE = 'bulltrout_data.json'; // existing combined file
-
+    // --- Data stores ---
     const monthData = {};   // m -> {month, sites:[...]}
     let allStacks = null;   // {stacks:[...]}
     const totalRange = {min: Infinity, max: -Infinity};
 
-    // Loaders
+    // --- Loaders ---
+    function fetchJson(url) {
+      return fetch(url).then(r => {
+        if (!r.ok) throw new Error(url+' → '+r.status+' '+r.statusText);
+        return r.json();
+      });
+    }
     function loadMonth(m) {
       if (monthData[m]) return Promise.resolve(monthData[m]);
-      return fetch(MONTH_FILES[m]).then(r => {
-        if (!r.ok) throw new Error('Failed to fetch '+MONTH_FILES[m]+' ('+r.status+')');
-        return r.json();
-      }).then(j => {
+      return fetchJson(MONTH_FILES[m]).then(j => {
         monthData[m] = j;
         (j.sites||[]).forEach(s => {
           totalRange.min = Math.min(totalRange.min, s.total);
@@ -244,19 +241,17 @@
     }
     function loadAllStacks() {
       if (allStacks) return Promise.resolve(allStacks);
-      return fetch(DETAILS_FILE).then(r => {
-        if (!r.ok) throw new Error('Failed to fetch '+DETAILS_FILE+' ('+r.status+')');
-        return r.json();
-      }).then(j => { allStacks = j; return j; });
+      return fetchJson(DETAILS_FILE).then(j => { allStacks = j; return j; });
     }
 
-    // UI
+    // --- UI elements (declare ONCE) ---
     const chkJul = document.getElementById('toggle-jul');
     const chkAug = document.getElementById('toggle-aug');
     const chkSep = document.getElementById('toggle-sep');
+
     [chkJul, chkAug, chkSep].forEach(chk => chk.addEventListener('change', scheduleRender));
 
-    // Layers
+    // --- Layer group & render scheduling ---
     const layerGroup = L.layerGroup().addTo(map);
     let renderScheduled = false;
     function scheduleRender() {
@@ -285,7 +280,6 @@
         Math.abs(s.lat - keyLat) < 1e-5 && Math.abs(s.lon - keyLon) < 1e-5 && s.month === month
       );
       if (!subset.length) return [];
-
       const rows = [];
       subset.forEach(stack => {
         (stack.items||[]).forEach(it => {
@@ -342,13 +336,6 @@
       });
     }
 
-    // Rendering
-    const chkJul = document.getElementById('toggle-jul');
-    const chkAug = document.getElementById('toggle-aug');
-    const chkSep = document.getElementById('toggle-sep');
-    const layerGroup = L.layerGroup().addTo(map);
-    let renderScheduled = false;
-
     function inBounds(lat, lon, bounds) { return bounds.contains([lat, lon]); }
 
     function render() {
@@ -361,10 +348,9 @@
       Promise.all(enabled.map(loadMonth)).then(() => {
         const merged = mergeSites(enabled);
         const bounds = map.getBounds();
-
         layerGroup.clearLayers();
 
-        const monthsHereOffsets = {7:[0,-16], 8:[-13.9, 8], 9:[13.9, 8]}; // triangle up; star left-down; circle right-down
+        const offsets = {7:[0,-16], 8:[-13.9,8], 9:[13.9,8]};
         Object.values(merged).forEach(loc => {
           if (!inBounds(loc.lat, loc.lon, bounds)) return;
           const monthsHere = Object.keys(loc.months).map(x=>parseInt(x));
@@ -372,13 +358,12 @@
 
           monthsHere.forEach(m => {
             const site = loc.months[m];
-            const total = site.total;
-            const size = Math.round(sizePx(total, totalRange.min, totalRange.max));
-            const icon = makeSegmentedIcon(shapeForMonth(m), site.counts, total, strokeForMonth(m), size);
+            const size = Math.round(sizePx(site.total, totalRange.min, totalRange.max));
+            const icon = makeSegmentedIcon(shapeForMonth(m), site.counts, site.total, strokeForMonth(m), size);
 
             let anchor = icon.options.iconAnchor.slice();
             if (monthsHere.length > 1) {
-              const d = monthsHereOffsets[m] || [0,0];
+              const d = offsets[m] || [0,0];
               anchor = [anchor[0] + d[0], anchor[1] + d[1]];
             }
             const shiftedIcon = L.divIcon({ className: icon.options.className, html: icon.options.html, iconSize: icon.options.iconSize, iconAnchor: anchor });
@@ -386,26 +371,21 @@
             attachPopup(marker, loc.lat, loc.lon, m, site);
           });
         });
-      }).catch(err => {
-        setStatus('Render error: '+err.message, true);
-      });
+      }).catch(err => setStatus('Render error: '+err.message, true));
     }
 
-    // Initial load: fetch all months for global size range, then fit & render
+    // Initial load → fetch all months for global size range, fit to bounds, then render
     Promise.all([loadMonth(7), loadMonth(8), loadMonth(9)]).then(() => {
-      // Fit to all points
       const bounds = [];
       [7,8,9].forEach(m => (monthData[m].sites||[]).forEach(s => bounds.push([s.lat, s.lon])));
       if (bounds.length) map.fitBounds(bounds, {padding: [20,20]});
       setStatus('Ready');
-      setTimeout(clearStatus, 1200);
+      clearStatusSoon();
       render();
-    }).catch(err => {
-      setStatus('Load error: '+err.message, true);
-    });
+    }).catch(err => setStatus('Load error: '+err.message, true));
 
-    map.on('moveend', () => { if (!renderScheduled) { renderScheduled = true; requestAnimationFrame(() => { renderScheduled = false; render(); }); } });
-    map.on('zoomend', () => { if (!renderScheduled) { renderScheduled = true; requestAnimationFrame(() => { renderScheduled = false; render(); }); } });
+    map.on('moveend', () => requestAnimationFrame(render));
+    map.on('zoomend', () => requestAnimationFrame(render));
 
   })();
   </script>
